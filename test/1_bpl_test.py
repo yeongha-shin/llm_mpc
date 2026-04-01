@@ -121,6 +121,7 @@ def select_query(actions):
 def run_simulation():
 
     # 가상의 숨겨진 항해사의 스타일을, 추정해 나가는게 중요함
+    # TODO: colreg vs mission, efficiency
 
     true_theta = np.array([0.8, 0.6, -0.4])
     # safety, timing, speed reduction 선호도
