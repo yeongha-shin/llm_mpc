@@ -29,9 +29,9 @@ class GPBPL:
         self.observations = []
 
         # 학습 포인트 그리드 (3차원)
-        self.n_theta = 10
-        self.n_dist = 5
-        self.n_obs = 5
+        self.n_theta = 8
+        self.n_dist = 4
+        self.n_obs = 4
         self.X = self._build_grid()
 
         # 커널 행렬
@@ -70,12 +70,11 @@ class GPBPL:
         )
 
     def _build_kernel_matrix(self):
-        n = len(self.X)
-        self.K = np.zeros((n, n))
-        for i in range(n):
-            for j in range(n):
-                self.K[i, j] = self._kernel(self.X[i], self.X[j])
-        self.K += self.noise_var * np.eye(n)
+        # 기존 이중 for loop 대신 벡터화
+        diff = self.X[:, None, :] - self.X[None, :, :]  # (n, n, 3)
+        sq_dist = np.sum(diff ** 2, axis=-1)  # (n, n)
+        self.K = self.signal_var * np.exp(-0.5 * sq_dist / self.length_scale ** 2)
+        self.K += self.noise_var * np.eye(len(self.X))
 
     def _sigmoid(self, x):
         return expit(x)
@@ -168,14 +167,11 @@ class GPBPL:
         return f_map, W_diag
 
     def posterior(self, X_test):
-        """
-        X_test: (n, 3) 정규화된 입력 배열
-        """
         n = len(self.X)
 
         if len(self.observations) == 0:
             mu = np.ones(len(X_test)) * self.prior_mean
-            var = np.array([self._kernel(x, x) for x in X_test])
+            var = np.ones(len(X_test)) * self.signal_var
             return mu, var
 
         f_map, W_diag = self._laplace_approximation()
@@ -185,17 +181,16 @@ class GPBPL:
         B = np.eye(n) + np.diag(W_sqrt) @ self.K @ np.diag(W_sqrt)
         cho_B = cho_factor(B)
 
-        k_star = np.array([[self._kernel(t, x) for x in self.X]
-                           for t in X_test])
+        diff = X_test[:, None, :] - self.X[None, :, :]
+        sq_dist = np.sum(diff ** 2, axis=-1)
+        k_star = self.signal_var * np.exp(-0.5 * sq_dist / self.length_scale ** 2)
 
-        mu = self.prior_mean + k_star @ cho_solve(cho_K,
-                                                  f_map - self.prior_mean)
+        mu = self.prior_mean + k_star @ cho_solve(cho_K, f_map - self.prior_mean)
 
-        var = np.zeros(len(X_test))
-        for i, t in enumerate(X_test):
-            k_tt = self._kernel(t, t)
-            v = cho_solve(cho_B, np.diag(W_sqrt) @ k_star[i])
-            var[i] = k_tt - k_star[i] @ np.diag(W_sqrt) @ v
+        # variance 벡터화
+        W_sqrt_mat = np.diag(W_sqrt)
+        V = cho_solve(cho_B, (k_star @ W_sqrt_mat).T)  # (n, n_test)
+        var = self.signal_var - np.sum((k_star @ W_sqrt_mat) * V.T, axis=1)
         var = np.maximum(var, 1e-10)
 
         return mu, var
@@ -223,14 +218,38 @@ class GPBPL:
         best_theta = theta_range[np.argmax(mu)]
         return best_theta
 
-    def next_query(self, context):
+    def next_query(self):
         """
-        주어진 context에서 다음 질문할 theta 쌍 반환
-        context: [min_dist, n_obstacles]
+        Step 1: 전체 (theta, context) 공간에서 uncertainty 가장 높은 context 찾기
+        Step 2: 그 context에서 theta 두 개 선택 (exploration vs exploitation)
         """
-        theta_range = np.linspace(self.theta_min, self.theta_max, 50)
+        # context 후보 그리드 생성
+        dist_candidates = np.linspace(self.min_dist_min, self.min_dist_max, 5)
+        n_obs_candidates = np.arange(self.n_obs_min, self.n_obs_max + 1, 2)
+
+        # Step 1: context별 평균 uncertainty 계산
+        best_context = None
+        best_context_var = -np.inf
+
+        theta_range = self.get_theta_range()
+
+        for dist in dist_candidates:
+            for n_obs in n_obs_candidates:
+                ctx = [dist, n_obs]
+                X_test = np.array([
+                    self._normalize(t, ctx[0], ctx[1])
+                    for t in theta_range
+                ])
+                _, var = self.posterior(X_test)
+                mean_var = np.mean(var)
+
+                if mean_var > best_context_var:
+                    best_context_var = mean_var
+                    best_context = ctx
+
+        # Step 2: 선택된 context에서 theta 두 개 선택
         X_test = np.array([
-            self._normalize(t, context[0], context[1])
+            self._normalize(t, best_context[0], best_context[1])
             for t in theta_range
         ])
         mu, var = self.posterior(X_test)
@@ -241,7 +260,7 @@ class GPBPL:
         # 현재 best (exploitation)
         theta_B = theta_range[np.argmax(mu)]
 
-        return theta_A, theta_B
+        return (theta_A, theta_B), best_context
 
     def get_theta_range(self, n_points=50):
         return np.linspace(self.theta_min, self.theta_max, n_points)

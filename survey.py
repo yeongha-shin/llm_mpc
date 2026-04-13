@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from modules.preference.gp_bpl import GPBPL
+import pickle
 
 def visualize(gp, current_context, iteration, fig):
     contexts = [
@@ -61,7 +62,7 @@ def run_survey():
     plt.ion()
     fig = plt.figure(figsize=(14, 8))  # 한번만 생성
 
-    max_iterations = 20
+    max_iterations = 5
 
     print("=" * 50)
     print("선박 운항 스타일 설문 시작")
@@ -71,14 +72,14 @@ def run_survey():
         print(f"\n[질문 {i}/{max_iterations}]")
 
         # 시나리오 context 랜덤 생성
-        min_dist = np.random.randint(500, 2001)
-        n_obstacles = np.random.randint(1, 6)
-        context = [min_dist, n_obstacles]
+
+        # 다음 질문 선택
+        (theta_A, theta_B), context = gp.next_query()
+        min_dist = context[0]
+        n_obstacles = context[1]
 
         print(f"\n상황: 장애물 {n_obstacles}척, 최소 거리 {min_dist}m")
 
-        # 다음 질문 선택
-        theta_A, theta_B = gp.next_query(context)
 
         print(f"\n  A: tc_cbf_gain = {theta_A:.4f} → "
               f"{'보수적 (일찍 회피)' if theta_A < 0.025 else '공격적 (늦게 회피)'}")
@@ -105,22 +106,29 @@ def run_survey():
 
     plt.ioff()
 
-    # 최종 결과 출력 (다양한 context에서)
-    print("\n" + "=" * 50)
-    print("설문 완료! 상황별 학습된 tc_cbf_gain:")
-    test_contexts = [
-        [500, 5],  # 가깝고 복잡
-        [500, 1],  # 가깝고 단순
-        [2000, 5],  # 멀고 복잡
-        [2000, 1],  # 멀고 단순
-        [1250, 3],  # 중간
-    ]
-    for ctx in test_contexts:
-        best = gp.get_current_best(ctx)
-        print(f"  dist={ctx[0]}m, n_obs={ctx[1]}척 → tc_cbf_gain={best:.4f}")
-    print("=" * 50)
+    save_path = 'gp_model.pkl'
+    with open(save_path, 'wb') as f:
+        pickle.dump(gp, f)
+    print(f"\nGP 모델 저장 완료: {save_path}")
 
-    plt.show()
+    return gp
+
+    # # 최종 결과 출력 (다양한 context에서)
+    # print("\n" + "=" * 50)
+    # print("설문 완료! 상황별 학습된 tc_cbf_gain:")
+    # test_contexts = [
+    #     [500, 5],  # 가깝고 복잡
+    #     [500, 1],  # 가깝고 단순
+    #     [2000, 5],  # 멀고 복잡
+    #     [2000, 1],  # 멀고 단순
+    #     [1250, 3],  # 중간
+    # ]
+    # for ctx in test_contexts:
+    #     best = gp.get_current_best(ctx)
+    #     print(f"  dist={ctx[0]}m, n_obs={ctx[1]}척 → tc_cbf_gain={best:.4f}")
+    # print("=" * 50)
+    #
+    # plt.show()
 
 
 if __name__ == '__main__':
