@@ -10,8 +10,14 @@ class GPBPL:
         self.theta_min = 0.001
         self.theta_max = 0.05
 
+        # context 범위
+        self.min_dist_min = 500
+        self.min_dist_max = 2000
+        self.n_obs_min = 1
+        self.n_obs_max = 5
+
         # GP 하이퍼파라미터
-        self.length_scale = 0.015
+        self.length_scale = 0.3  # 정규화된 공간에서의 length scale
         self.signal_var = 1.0
         self.noise_var = 1e-4
 
@@ -19,16 +25,49 @@ class GPBPL:
         self.prior_mean = 0.0
 
         # 관측 데이터
-        self.observations = []  # (theta_A, theta_B, preference)
+        # (theta_A, context_A, theta_B, context_B, preference)
+        self.observations = []
 
-        # 학습 포인트 (고정 그리드)
-        self.n_points = 50
-        self.X = np.linspace(self.theta_min, self.theta_max, self.n_points)
+        # 학습 포인트 그리드 (3차원)
+        self.n_theta = 10
+        self.n_dist = 5
+        self.n_obs = 5
+        self.X = self._build_grid()
 
-        # Laplace approximation 결과 캐시
-        self.f_map = None
+        # 커널 행렬
         self.K = None
         self._build_kernel_matrix()
+
+    def _build_grid(self):
+        """3차원 그리드 생성"""
+        theta_grid = np.linspace(0, 1, self.n_theta)
+        dist_grid = np.linspace(0, 1, self.n_dist)
+        obs_grid = np.linspace(0, 1, self.n_obs)
+
+        points = []
+        for t in theta_grid:
+            for d in dist_grid:
+                for o in obs_grid:
+                    points.append([t, d, o])
+        return np.array(points)
+
+    def _normalize(self, theta, min_dist, n_obstacles):
+        """입력값 정규화 (0~1)"""
+        t_norm = (theta - self.theta_min) / (self.theta_max - self.theta_min)
+        d_norm = (min_dist - self.min_dist_min) / (self.min_dist_max - self.min_dist_min)
+        o_norm = (n_obstacles - self.n_obs_min) / (self.n_obs_max - self.n_obs_min)
+        return np.array([t_norm, d_norm, o_norm])
+
+    def _denormalize_theta(self, t_norm):
+        """theta 역정규화"""
+        return t_norm * (self.theta_max - self.theta_min) + self.theta_min
+
+    def _kernel(self, x1, x2):
+        """RBF 커널 (3차원)"""
+        diff = x1 - x2
+        return self.signal_var * np.exp(
+            -0.5 * np.dot(diff, diff) / self.length_scale ** 2
+        )
 
     def _build_kernel_matrix(self):
         n = len(self.X)
@@ -38,26 +77,24 @@ class GPBPL:
                 self.K[i, j] = self._kernel(self.X[i], self.X[j])
         self.K += self.noise_var * np.eye(n)
 
-    def _kernel(self, x1, x2):
-        return self.signal_var * np.exp(
-            -0.5 * ((x1 - x2) / self.length_scale) ** 2
-        )
-
     def _sigmoid(self, x):
         return expit(x)
 
-    def _get_f_values(self, f, theta):
-        """theta에 해당하는 f값 선형 보간"""
-        idx = np.searchsorted(self.X, theta)
-        idx = np.clip(idx, 0, len(self.X) - 1)
-        return f[idx]
+    def _get_f_value(self, f, x_norm):
+        """정규화된 입력에 해당하는 f값 (최근접 포인트)"""
+        dists = np.linalg.norm(self.X - x_norm, axis=1)
+        idx = np.argmin(dists)
+        return f[idx], idx
 
     def _log_likelihood(self, f):
-        """pairwise 비교 관측에 대한 log likelihood"""
         log_lik = 0.0
-        for theta_A, theta_B, pref in self.observations:
-            f_A = self._get_f_values(f, theta_A)
-            f_B = self._get_f_values(f, theta_B)
+        for theta_A, ctx_A, theta_B, ctx_B, pref in self.observations:
+            x_A = self._normalize(theta_A, ctx_A[0], ctx_A[1])
+            x_B = self._normalize(theta_B, ctx_B[0], ctx_B[1])
+
+            f_A, _ = self._get_f_value(f, x_A)
+            f_B, _ = self._get_f_value(f, x_B)
+
             diff = f_A - f_B
             if pref == 1:
                 log_lik += np.log(self._sigmoid(diff) + 1e-10)
@@ -66,18 +103,15 @@ class GPBPL:
         return log_lik
 
     def _log_likelihood_grad(self, f):
-        """log likelihood의 gradient"""
         grad = np.zeros(len(f))
-        for theta_A, theta_B, pref in self.observations:
-            idx_A = np.searchsorted(self.X, theta_A)
-            idx_B = np.searchsorted(self.X, theta_B)
-            idx_A = np.clip(idx_A, 0, len(self.X) - 1)
-            idx_B = np.clip(idx_B, 0, len(self.X) - 1)
+        for theta_A, ctx_A, theta_B, ctx_B, pref in self.observations:
+            x_A = self._normalize(theta_A, ctx_A[0], ctx_A[1])
+            x_B = self._normalize(theta_B, ctx_B[0], ctx_B[1])
 
-            f_A = f[idx_A]
-            f_B = f[idx_B]
+            f_A, idx_A = self._get_f_value(f, x_A)
+            f_B, idx_B = self._get_f_value(f, x_B)
+
             diff = f_A - f_B
-
             if pref == 1:
                 s = self._sigmoid(-diff)
             else:
@@ -88,26 +122,22 @@ class GPBPL:
         return grad
 
     def _log_likelihood_hessian_diag(self, f):
-        """log likelihood의 Hessian 대각 원소"""
         hess_diag = np.zeros(len(f))
-        for theta_A, theta_B, pref in self.observations:
-            idx_A = np.searchsorted(self.X, theta_A)
-            idx_B = np.searchsorted(self.X, theta_B)
-            idx_A = np.clip(idx_A, 0, len(self.X) - 1)
-            idx_B = np.clip(idx_B, 0, len(self.X) - 1)
+        for theta_A, ctx_A, theta_B, ctx_B, pref in self.observations:
+            x_A = self._normalize(theta_A, ctx_A[0], ctx_A[1])
+            x_B = self._normalize(theta_B, ctx_B[0], ctx_B[1])
 
-            f_A = f[idx_A]
-            f_B = f[idx_B]
+            f_A, idx_A = self._get_f_value(f, x_A)
+            f_B, idx_B = self._get_f_value(f, x_B)
+
             diff = f_A - f_B
-
-            s = self._sigmoid(diff) * self._sigmoid(-diff)  # σ(1-σ)
+            s = self._sigmoid(diff) * self._sigmoid(-diff)
 
             hess_diag[idx_A] -= s
             hess_diag[idx_B] -= s
         return hess_diag
 
     def _laplace_approximation(self):
-        """MAP 추정 + Hessian으로 posterior 근사"""
         n = len(self.X)
         f_init = np.zeros(n)
         cho = cho_factor(self.K)
@@ -132,46 +162,37 @@ class GPBPL:
         )
 
         f_map = result.x
-
-        # Hessian: W = -∇∇ log p(y|f)
         W_diag = -self._log_likelihood_hessian_diag(f_map)
-        W_diag = np.maximum(W_diag, 1e-10)  # 수치 안정성
+        W_diag = np.maximum(W_diag, 1e-10)
 
         return f_map, W_diag
 
-    def posterior(self, theta_test):
-        """posterior mean과 variance 계산"""
+    def posterior(self, X_test):
+        """
+        X_test: (n, 3) 정규화된 입력 배열
+        """
         n = len(self.X)
 
         if len(self.observations) == 0:
-            # 관측 없으면 사전분포
-            mu = np.ones(len(theta_test)) * self.prior_mean
-            var = np.array([self._kernel(t, t) for t in theta_test])
+            mu = np.ones(len(X_test)) * self.prior_mean
+            var = np.array([self._kernel(x, x) for x in X_test])
             return mu, var
 
-        # Laplace approximation
         f_map, W_diag = self._laplace_approximation()
-        self.f_map = f_map
-
         cho_K = cho_factor(self.K)
 
-        # W^{1/2}
         W_sqrt = np.sqrt(W_diag)
-
-        # B = I + W^{1/2} K W^{1/2}
         B = np.eye(n) + np.diag(W_sqrt) @ self.K @ np.diag(W_sqrt)
         cho_B = cho_factor(B)
 
-        # 테스트 포인트에 대한 k_star
         k_star = np.array([[self._kernel(t, x) for x in self.X]
-                           for t in theta_test])
+                           for t in X_test])
 
-        # Posterior mean
-        mu = self.prior_mean + k_star @ cho_solve(cho_K, f_map - self.prior_mean)
+        mu = self.prior_mean + k_star @ cho_solve(cho_K,
+                                                  f_map - self.prior_mean)
 
-        # Posterior variance
-        var = np.zeros(len(theta_test))
-        for i, t in enumerate(theta_test):
+        var = np.zeros(len(X_test))
+        for i, t in enumerate(X_test):
             k_tt = self._kernel(t, t)
             v = cho_solve(cho_B, np.diag(W_sqrt) @ k_star[i])
             var[i] = k_tt - k_star[i] @ np.diag(W_sqrt) @ v
@@ -179,25 +200,48 @@ class GPBPL:
 
         return mu, var
 
-    def add_observation(self, theta_A, theta_B, preference):
-        self.observations.append((theta_A, theta_B, preference))
+    def add_observation(self, theta_A, context_A, theta_B, context_B, preference):
+        """
+        context_A, context_B: [min_dist, n_obstacles]
+        preference: 1이면 A 선호, 0이면 B 선호
+        """
+        self.observations.append(
+            (theta_A, context_A, theta_B, context_B, preference)
+        )
 
-    def get_current_best(self):
-        theta_range = self.get_theta_range()
-        mu, _ = self.posterior(theta_range)
-        return theta_range[np.argmax(mu)]
+    def get_current_best(self, context):
+        """
+        주어진 context에서 가장 선호되는 theta 반환
+        context: [min_dist, n_obstacles]
+        """
+        theta_range = np.linspace(self.theta_min, self.theta_max, 50)
+        X_test = np.array([
+            self._normalize(t, context[0], context[1])
+            for t in theta_range
+        ])
+        mu, _ = self.posterior(X_test)
+        best_theta = theta_range[np.argmax(mu)]
+        return best_theta
 
-    def get_theta_range(self, n_points=100):
-        return np.linspace(self.theta_min, self.theta_max, n_points)
+    def next_query(self, context):
+        """
+        주어진 context에서 다음 질문할 theta 쌍 반환
+        context: [min_dist, n_obstacles]
+        """
+        theta_range = np.linspace(self.theta_min, self.theta_max, 50)
+        X_test = np.array([
+            self._normalize(t, context[0], context[1])
+            for t in theta_range
+        ])
+        mu, var = self.posterior(X_test)
 
-    def next_query(self):
-        theta_range = self.get_theta_range()
-        mu, var = self.posterior(theta_range)
-
-        # uncertainty 가장 높은 포인트
+        # uncertainty 가장 높은 포인트 (exploration)
         theta_A = theta_range[np.argmax(var)]
 
-        # 현재 best (posterior mean 최대)
+        # 현재 best (exploitation)
         theta_B = theta_range[np.argmax(mu)]
 
         return theta_A, theta_B
+
+    def get_theta_range(self, n_points=50):
+        return np.linspace(self.theta_min, self.theta_max, n_points)
