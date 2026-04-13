@@ -13,7 +13,7 @@ r_min = -np.pi / 6
 acc_max = 0.5
 rd_max = 0.5
 
-tc_cbf_gain = 0.015
+tc_cbf_gain = 0.05 # range (0.001 ~ 0.05, default = 0.015)
 tc_cbf_cparam = 15
 ed_cbf_gain = 0.03
 
@@ -21,7 +21,7 @@ ed_cbf_gain = 0.03
 # tc_cbf_cparam = 15    # 회피 곡선 반경 → 클수록 크게 돌아서 회피
 # ed_cbf_gain = 0.03    # follow ship 모드 보수성
 
-sim_tim = 400
+sim_tim = 1000
 vd = 3
 
 x0 = np.array([0, 0, 0, vd, 0])

@@ -131,7 +131,7 @@ def main():
 
         # 최적 solver 선택
         d = np.argmin(costs) + 1
-        d = 3  # 강제 선택 (MATLAB과 동일)
+        d = 1  # 강제 선택 (MATLAB과 동일)
         # d = 1  # solver 1 → topo=1 (위쪽 회피)
         # d = 2  # solver 2 → topo=-1 (아래쪽 회피)
         # d = 3  # solver 3 → topo=0 (추종, 앞에서 멈추거나 따라감)
@@ -200,7 +200,7 @@ def main():
                 ax_main.add_patch(circle)
 
             ax_main.set_xlim([-5, xs[0]+5])
-            ax_main.set_ylim([-150, 150])
+            ax_main.set_ylim([-450, 450])
             ax_main.set_title(f'Time: {t_hist[-1]:.2f} s')
             ax_main.set_xlabel('x [m]')
             ax_main.set_ylabel('y [m]')
